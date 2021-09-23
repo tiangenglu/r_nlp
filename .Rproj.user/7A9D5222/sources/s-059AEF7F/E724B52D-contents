@@ -1,0 +1,13 @@
+Package: WordDistance
+Type: Package
+Title: Text Analyses Tools for Word Distance Calculation and Frequent Terms Nearby
+Version: 0.1.0
+Author: Tiangeng Lu <tul54@psu.edu>
+Maintainer: Tiangeng Lu <tul54@psu.edu>
+Description: Provide several text analyses tools. Calculate the distance between two words in a text. 
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+Depends: 
+    R (>= 2.10)
+Imports: tm, dplyr
