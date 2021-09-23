@@ -1,0 +1,18 @@
+Package: WordDistance
+Title: Text Analyses Tools for Word Distance Calculation and Frequency Table Around a Word
+Version: 0.0.0.9000
+Authors@R: 
+    person(given = "Tiangeng",
+           family = "Lu",
+           role = c("aut", "cre"),
+           email = "tul54@psu.edu",
+           comment = c(ORCID = "https://orcid.org/0000-0001-7299-855X"))
+Description: Several text analyses tools. Pairwise word distance matrix. Percentage of pairwise word co-occurrence within certain distance. Frequency table within distance.
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+Depends: 
+    R (>= 2.10)
+Imports: tm, dplyr
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.1.2
