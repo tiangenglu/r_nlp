@@ -1,0 +1,1326 @@
+---
+title: "Skilled Migration Literature Review"
+author: "Tiangeng Lu"
+date: '`r paste("First created on 2023-04-25. Updated on", Sys.Date())`'
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+---
+
+# Setup
+
+Filename: `mig2830.Rmd`
+
+## Libraries
+
+```{r message = F}
+Sys.time()
+#getwd()
+# Update here for each folder
+directory <- "wos_mig"
+folder <- paste(getwd(), directory, sep = "/") 
+library(readxl)
+library(writexl)
+library(DT)
+library(tidyr)
+library(dplyr) # mutate
+library(ggplot2)
+library(stringr) # str_extract(x, pattern)
+# Pre-selected columns from Web of Science saved records 
+wos_cols <- scan(file = "wos_cols.txt", what = character(), sep = '\t')
+wos_cols
+```
+
+## User-Defined Functions
+
+### Simple Frequency Table with Percentage
+
+User-defined functions: `freq_tables` and `print_freq_tables` for simple frequency tables
+
+```{r}
+# Generate a descending frequency table from a variable
+freq_tables <- function(var) {
+  freq_table <- data.frame(table(var))
+  freq_table <- freq_table[rev(order(freq_table$Freq)),]
+  freq_table$cumsum <- cumsum(freq_table$Freq)
+  freq_table$prop <- freq_table$Freq / length(var)
+  freq_table$cum <- cumsum(freq_table$prop)
+  freq_table$pct <- paste(round(freq_table$prop*100, 2), "%", sep = "")
+  freq_table$cumpct <- paste(round(freq_table$cum*100, 2), "%", sep = "")
+  return(freq_table)
+}
+# Print out a descending frequency table from a variable
+print_freq_tables <- function(var) {
+  freq_table <- data.frame(table(var))
+  freq_table <- freq_table[rev(order(freq_table$Freq)),]
+  freq_table$cumsum <- cumsum(freq_table$Freq)
+  freq_table$prop <- freq_table$Freq / length(var)
+  freq_table$cum <- cumsum(freq_table$prop)
+  freq_table$pct <- paste(round(freq_table$prop*100, 2), "%", sep = "")
+  freq_table$cumpct <- paste(round(freq_table$cum*100, 2), "%", sep = "")
+  rownames(freq_table) <- seq_along(1:nrow(freq_table))
+  return(datatable(freq_table[,c("var","Freq","cumsum","pct","cumpct")]))
+}
+```
+
+### Frequency Table for Cross-listings (customized total)
+
+Frequency table of cross-listed categories with a controlled total that is not the total count.
+
+```{r freq_tab_func}
+## Frequency table of cross-listed categories with a controlled total that is not the total count.
+## This function will NOT return cumulative sum because when the total count do not equal to the actual total, the cumulative sum does not make much sense.
+## The default value is the total count. When there is no cross-listing, the denominator is the total count of observations by default.
+############### ADD CONDITIONAL PROCESSING FOR MORE ROBUST FUNCTIONS ####################
+freq_crosslist <- function(var, denominator = length(var)) {
+  if (length(var) > 1) {
+    fq_crlt <- data.frame(table(var))
+    fq_crlt <- fq_crlt[rev(order(fq_crlt$Freq)), ]
+    fq_crlt$prop <- fq_crlt$Freq / denominator
+    names(fq_crlt) <- c("Term", "Frequency", "Share")
+    fq_crlt$Term <-
+      as.character(fq_crlt$Term) # save the Term column as characters from factors, to avoid auto-recoding
+    fq_crlt$Share <- as.numeric(fq_crlt$Share)
+    rownames(fq_crlt) <- NULL
+    return(fq_crlt) ## CONDITIONAL STATEMENT
+  } else if (length(var) == 1) {
+    fq_crlt <- data.frame(matrix(ncol = 3, nrow = 1))
+    colnames(fq_crlt) <- c("Term", "Frequency", "Share")
+    fq_crlt$Term <- var
+    fq_crlt$Frequency <- 1
+    fq_crlt$Share <- 1
+    return(fq_crlt) ## CONDITIONAL STATEMENT
+  } else if (length(var) < 1) {
+    fq_crlt <- data.frame(matrix(ncol = 3, nrow = 1))
+    colnames(fq_crlt) <- c("Term", "Frequency", "Share")
+    fq_crlt$Term <- "Place_Holder"
+    fq_crlt$Frequency <- 0
+    fq_crlt$Share <- 0
+    print("The expected multi-element vector has no elements, a place holder row with `Frequency = 0` is introduced.")
+    return(fq_crlt)}
+}
+
+
+#############THE FOLLOWING DID NOT HAVE THE ROBUST FEATURES AS THE ABOVE.
+#############THE ROBUST FEATURES ARE NOT NEEDED BECAUSE LOOP TO DISPLAY MULTIPLE TABLES DOESN'T WORK.
+
+## Compared to freq_crosslist, the following display-only function creates the percent column with 2 decimal places.
+print_fq_crlt <- function(var, denominator = length(var), header = default_header) {
+  ## copy from the freq_crosslist function
+  fq_crlt <- data.frame(table(var))
+  fq_crlt <- fq_crlt[rev(order(fq_crlt$Freq)),]
+  fq_crlt$prop <- fq_crlt$Freq / denominator
+  names(fq_crlt) <- c("Term","Frequency","Share")
+  fq_crlt$Term <- as.character(fq_crlt$Term) # save the Term column as characters from factors, to avoid auto-recoding
+  fq_crlt$Share <- as.numeric(fq_crlt$Share)
+  rownames(fq_crlt) <- NULL
+  fq_crlt$Percent <- paste(round(100*fq_crlt$Share, 2), "%", sep = "")
+  ## the above is copied from freq_crosslist
+  default_header = paste("Frequency Table", "(including cross-listed items)")
+  return(datatable(fq_crlt[, !colnames(fq_crlt) %in% c("Share")], caption = header))
+}
+
+## Optional next step, challenge a loop that iteratively process multiple frequency tables, indexing from a list of variables
+```
+
+### Word Tokenize & N-grams
+
+I also wrote a simple tokenizing function `str_tokenize`, inspired by Python `nltk`. Another very handy function is `word_count`. Then, I added `bi_gram()` and `tri_gram()` functions to simplify my work.
+
+```{r}
+str_tokenize <- function(text, split){
+  if(class(text) == "character") {
+    my_token <- unlist(strsplit(text, split = split))
+    names(my_token) <- seq_along(my_token)
+    return(my_token)
+  } else stop("The input text string class must be in character.")
+} # added on May 6, 2023
+
+word_count <- function(text, split = " ") {
+  if(class(text) == "character") {
+    sapply(strsplit(text, split = split), length)
+  } else stop("The input text string class must be in character.")
+}
+
+## The following n-gram functions return a vector of n-grams from a text body. Input text must be tokenized.
+bi_gram <- function(token) {
+  if (length(token) >= 3) {
+    bi_gram <- c()
+    for (i in 1:(length(token) - 1)) {
+      bi_gram[i] <- paste(token[i], token[i + 1])
+    }
+    return(bi_gram)
+  } else
+    stop("The input text must be TOKENIZED and has length greater than 2.")
+}
+
+tri_gram <- function(token) {
+  if (length(token) >= 4) {
+  tri_gram <- c()
+  for (i in 1: (length(token) - 2 )) {
+  tri_gram[i] <- paste(token[i], token[i+1], token[i+2])
+  }
+  return(tri_gram)
+  } else stop("The input text must be TOKENIZED and has length greater than 3.")
+}
+```
+
+# Data
+
+![TS = (skilled migrat\* OR h1b OR h1-b OR h-1b OR skilled immigra\*)](mig2830.png)
+
+## Search Terms
+
+`TS = (skilled migrat* OR h1b OR h1-b OR h-1b OR skilled immigra*)`
+
+## Read-in Raw Data
+
+List all files in the directory
+
+```{r}
+list.files(path = folder)
+filenames <- list.files(path = folder)
+# Only read in excel files
+filenames <- filenames[grepl(pattern = ".xlsx", filenames)]
+```
+
+## Prepare Data
+
+Read in every eligible file in the directory. Make sure the data structure is the same, and then join them horizontally
+
+```{r}
+nlist <- vector("list", length(filenames))
+# Read-in all eligible files from directory
+# Make sure to double wrap a list element with [[]]
+for (n in 1: length(filenames)) {
+  nlist[[n]] <- read_excel(path = paste(folder, filenames[n], sep = "/"), sheet = "savedrecs")
+}
+# Concatenate multiple dataframes into one single dataframe. 
+# Do this outside the loop to keep the original column names
+dat_raw <- do.call(what = "rbind", lapply(nlist, as.data.frame))
+nrow(dat_raw)
+# Keep Article, Proceedings Paper
+table(dat_raw$`Document Type`)
+dat_temp <- dat_raw[grepl(pattern = ("Article|Proceedings Paper"), dat_raw$`Document Type`),]
+nrow(dat_temp)
+table(dat_temp$`Document Type`)
+# Remove rows with empty publication years
+dat_temp <- dat_temp[!is.na(dat_temp$`Publication Year`),]
+nrow(dat_temp)
+table(dat_temp$`Publication Year`)
+# Select columns based on pre-determined variables. Make sure the format of column names are consistent.
+dat <- dat_temp[,names(dat_temp) %in% wos_cols]
+# validate that all wanted columns are included, expecting all TRUEs
+names(dat) %in% wos_cols
+dat <- dat[order(dat$`Publication Year`),]
+```
+
+### Missing Values
+
+```{r}
+colSums(is.na(dat))
+```
+
+Many entries don't `DOI` information. Need other column as case identifier
+
+```{r}
+# Which is the one that doesn't have WoS Category?
+dat$`Source Title`[is.na(dat$`WoS Categories`)]
+# This can be imputed. Since the source journal is self explanatory
+dat$`WoS Categories`[dat$`Source Title` == "PHILIPPINE POLITICAL SCIENCE JOURNAL"] <- "Political Science"
+# Check missing values again
+colSums(is.na(dat))
+```
+
+Are the missing keywords from specific journals?
+
+```{r}
+print_freq_tables(dat$`Source Title`[is.na(dat$`Author Keywords`) & is.na(dat$`Keywords Plus`)])
+# International Migration has many missing keywords
+```
+
+Are the missing keywords entries from specific years?
+
+```{r}
+print_freq_tables(dat$`Publication Year`[is.na(dat$`Author Keywords`) & is.na(dat$`Keywords Plus`)])
+```
+
+### Case ID
+
+Because not all entries have DOI, a hand-made case ID column is needed.
+
+```{r dat_id}
+# last two-digit of publication year
+yr <- substr(dat$`Publication Year`, start = 3, stop = 4)
+# numbering rows within groups
+dat <- dat %>% group_by(`Publication Year`) %>% mutate(count = row_number())
+# concatenate a id column
+id <- paste(yr, dat$count, sep = "_")
+# add id columns
+dat$id <- id
+dat$id2 <- 1:nrow(dat)
+
+## ids for 1991-2020
+id_1991_2020 <- dat$id[dat$`Publication Year`>=1991 & dat$`Publication Year` <=2020]
+## ids for 1991-2022
+id_1991_2022 <- dat$id[dat$`Publication Year`>=1991 & dat$`Publication Year` <=2022]
+
+# drop count and DOI columns
+dat <- dat[, !names(dat) %in% c("DOI","count")]
+# activate the following
+#dat <- dat[dat$`Publication Year` <2023, ]
+```
+
+Create ids for each decade.
+
+```{r id_decade}
+id80 <- dat$id[dat$`Publication Year` <= 1990]
+id90 <- dat$id[dat$`Publication Year` >= 1991 & dat$`Publication Year` <= 2000]
+id00 <- dat$id[dat$`Publication Year` >= 2001 & dat$`Publication Year` <= 2010]
+id10 <- dat$id[dat$`Publication Year` >= 2011 & dat$`Publication Year` <= 2020]
+id20 <- dat$id[dat$`Publication Year` >= 2021 & dat$`Publication Year` <= 2030]
+```
+
+### Keywords
+
+Concatenate keywords
+
+```{r keyword}
+# assign missing keyword columns to 99
+dat$`Author Keywords`[is.na(dat$`Author Keywords`)] <- '99'
+dat$`Keywords Plus`[is.na(dat$`Keywords Plus`)] <- '99'
+# concatenate two keyword columns into one column
+keywords <- paste(dat$`Author Keywords`, dat$`Keywords Plus`, sep = ";")
+# add the concatenated keyword column to the main data
+dat$keywords <- keywords
+# replace the place-holder '99's to ''
+dat$keywords <- gsub(pattern = '99;99|99|99;|:99', replacement = '', dat$keywords)
+# change case to upper
+dat$keywords <- toupper(dat$keywords)
+# note the blank cells are not NAs, take care of it later
+sum(is.na(dat$keywords))
+# drop the original keyword columns
+dat <- dat[, !names(dat) %in% c("Author Keywords","Keywords Plus")]
+# Percent of missing rows
+nrow(dat[nchar(dat$keywords)<1,])
+nrow(dat[nchar(dat$keywords)>=1,])/nrow(dat)
+nrow(dat[nchar(dat$keywords)<1,])/nrow(dat)
+```
+
+## Save Data
+
+```{r eval = F}
+# Prepare a readme file that provides information of this data
+readme <- data.frame(cbind(
+  source = "Web of Science",
+  search = "TS = (skilled migrat* OR h1b OR h1-b OR h-1b OR skilled immigra*)",
+  date = as.character(as.Date(Sys.Date())),
+  notes = "re-download after meeting with Dr. Morcol on 04/24/2023 to include all entries regardless of their discipline"
+))
+# Adaptive file name
+data_name = paste(directory, nrow(dat_raw), ".xlsx", sep = "")
+write_xlsx(list("readme" = readme, "data" = dat, "raw" = dat_raw), data_name)
+```
+
+## Re-load Data
+
+```{r eval = F}
+dat <- read_excel(path = data_name, sheet = "data")
+dat <- dat[order(dat$`Publication Year`),]
+# when reload the data, the blank entries become missing
+colSums(is.na(dat))
+```
+
+# Text Preprocessing
+
+```{r message = F}
+library(textstem) # lemmatize_strings
+library(stopwords)
+library(tm) # removePunctuation
+```
+
+## Before (raw text)
+
+```{r}
+## Step 1: fill NA abstract with ""
+dat$Abstract[is.na(dat$Abstract)] <- ''
+paste(dat$`Article Title`[100], dat$Abstract[100], sep = ' ')
+## Step 2: Concatenate article title and abstract
+maintext_raw = tolower(paste(dat$`Article Title`, dat$Abstract, sep = ' '))
+## Step 3: replace hyphen with space
+maintext <- gsub('-',' ', maintext_raw)
+## Step 4: Lemmatize
+lemm <- lemmatize_strings(maintext)
+## Step 5: remove punctuation
+no_punct <- removePunctuation(lemm)
+## Step 6: Remove stopwords and tokenize (manual tokenize using unlist and strsplit)
+final_text <- c()
+for (i in 1:length(no_punct)) {
+  final_text[i] <- paste(
+  unlist(strsplit(no_punct[i], split = ' '))[!unlist(strsplit(no_punct[i], split = ' ')) %in% stopwords::stopwords()], collapse = ' '
+)
+}
+final_text <- gsub("\\s+", " ", final_text) # remove excessive white space
+dat$text <- final_text
+```
+
+## After (processed text)
+
+Show the same text string after preprocessing
+
+```{r}
+dat$text[100]
+```
+
+# Analysis
+
+Start from discipline and longitudinal patterns, and then split all the entries by decade
+
+## Discipline
+
+Continue working with a smaller number of columns
+
+```{r}
+names(dat)
+year_cat <- separate_rows(dat[,c("Publication Year", "WoS Categories")], "WoS Categories", sep = ";", convert = TRUE)
+dim(year_cat)
+# Trim white space
+year_cat$`WoS Categories` <- trimws(year_cat$`WoS Categories`)
+```
+
+What is the distribution by discipline?
+
+```{r}
+cat_freq <- data.frame(table(year_cat$`WoS Categories`))
+cat_freq$prop <- cat_freq$Freq/length(dat$id)
+cat_freq <- cat_freq[rev(order(cat_freq$Freq)),]
+sum(cat_freq$prop) # > 1 because of one publication can belong to more disciplines
+cat_freq$pct <- paste(round(cat_freq$prop,4)*100,"%",sep = "")
+rownames(cat_freq) <- 1:nrow(cat_freq)
+datatable(cat_freq)
+```
+
+How many publications have more than one discipline?
+
+```{r}
+# Publications that belong to more than 1 discipline
+length(grep(pattern = ";", dat$`WoS Categories`))
+# In % expression
+paste(100*length(grep(pattern = ";", dat$`WoS Categories`))/nrow(dat),"%")
+# Frequency table of all presented discipline combinations
+print_freq_tables(dat$`WoS Categories`)
+```
+
+What is the share of PLSC/PADM in this universe?
+
+```{r}
+# Index the row numbers of PLSC and PADM publications
+plsc_padm_i <- grep(pattern = "Political Science|Public Administration", dat$`WoS Categories`)
+# How many publications belong either to PLSC and PADM
+length(plsc_padm_i)
+# the share of PLSC and PADM in %
+paste(100*length(plsc_padm_i)/nrow(dat),"%")
+```
+
+Which journals publish the most in PLSC/PADM?
+
+```{r}
+print_freq_tables(dat$`Source Title`[plsc_padm_i])
+top_plsc_padm_j <- freq_tables(dat$`Source Title`[plsc_padm_i])$var[1]
+# Which discipline does the top PLSC/PADM journal belong to?
+unique(dat$`WoS Categories`[dat$`Source Title` == top_plsc_padm_j])
+```
+
+### Journal distribution
+
+Econ
+
+```{r}
+econ_i <- grep(pattern = "Economics", dat$`WoS Categories`)
+length(econ_i)
+print_freq_tables(dat$`Source Title`[econ_i])
+```
+
+Demo
+
+```{r}
+demo_i <- grep(pattern = "Demography", dat$`WoS Categories`)
+length(demo_i)
+print_freq_tables(dat$`Source Title`[demo_i])
+```
+
+Which are the most "productive" journals?
+
+```{r}
+print_freq_tables(dat$`Source Title`)
+```
+
+## Year
+
+```{r}
+table(dat$`Publication Year`)
+year_ct <- dat[dat$`Publication Year`>1990 & dat$`Publication Year`<2023,] %>% count(`Publication Year`)
+```
+
+```{r}
+ggplot(data = year_ct, aes(x = `Publication Year`, y = n)) +
+  geom_line() +
+  labs(title = paste(min(year_ct$`Publication Year`),"to",max(year_ct$`Publication Year`)), y = "Publication Count")
+```
+
+How many were published in or before 1990? When did the first publication came out?
+
+```{r}
+# Use DOI as the unique publication identifier, count the length of items in or before 1990
+length(dat$id[dat$`Publication Year` <= 1990])
+# The earliest publication
+dat[dat$`Publication Year` == min(dat$`Publication Year`),c("Article Title", "Publication Year", "Source Title","WoS Categories")]
+```
+
+## Discipline by Year
+
+Qualitatively examine the earliest publications, then systematically investigate publications by decades.
+
+### Earliest Publications
+
+Which disciplines were the earliest to study this? (\<=1990)
+
+```{r}
+# Which are the disciplines that published this topic in or before 1990?
+cat_early <- trimws(unlist(strsplit(dat$`WoS Categories`[dat$`Publication Year` <=1990], split = ";")))
+print_freq_tables(cat_early)
+```
+
+The earliest publication
+
+```{r}
+dat[dat$`Publication Year` == min(dat$`Publication Year`),c("Publication Year","Source Title", "WoS Categories")]
+dat$`Article Title`[dat$`Publication Year` == min(dat$`Publication Year`)] # Not available
+```
+
+Fill the blank abstract(s)
+
+```{r echo = F}
+dat$Abstract[dat$`Article Title` == "STUDIES OF MIGRATION OF SKILLED PERSONNEL IN AGRICULTURE"] <- "The migration of the rural population today exerts a many-sided influence on the reproduction of labor power in the countryside, including skilled rural workers. The specific economic assessment of migration and its consequences depends on the specific situation, place, and time. In regions with a labor surplus it will be different from rural regions with an acute shortage of labor power."
+```
+
+```{r}
+datatable(dat[dat$`Publication Year` <= 1990,c("Publication Year","Source Title", "Article Title")])
+```
+
+Earliest in PLSC/PADM
+
+```{r}
+datatable(dat[plsc_padm_i,c("Publication Year","Source Title", "Article Title")])
+```
+
+### Publication Count by Decade
+
+Add a decade column
+
+```{r}
+# Initiate a new column
+dat$decade <- NA
+# Assign decade-specific values
+dat$decade[dat$`Publication Year` <= 1990] <- "t80"
+dat$decade[dat$`Publication Year` >= 1991 & dat$`Publication Year` <= 2000] <- "t90"
+dat$decade[dat$`Publication Year` >= 2001 & dat$`Publication Year` <= 2010] <- "t00"
+dat$decade[dat$`Publication Year` >= 2011 & dat$`Publication Year` <= 2020] <- "t10"
+dat$decade[dat$`Publication Year` >= 2021 & dat$`Publication Year` <= 2030] <- "t20"
+# Make it an ordered factor
+dat$decade <- factor(dat$decade, ordered = T, levels = c("t80", "t90", "t00", "t10", "t20"))
+levels(dat$decade)
+```
+
+```{r}
+print_freq_tables(dat$decade)
+```
+
+### Share of PLSC/PADM
+
+Get id for PLSC/PADM for the 1991-2020 data
+
+```{r}
+id_plsc <- dat$id[grep(pattern = "Political Science", dat$`WoS Categories`)]
+id_padm <- dat$id[grep(pattern = "Public Administration", dat$`WoS Categories`)]
+## ids for PLSC & PADM publications
+id_plsc_padm <- union(id_padm, id_plsc)
+```
+
+Count of PLSC PADM in 90s, 00s, and 10s
+
+```{r}
+dat_9010 <- dat[dat$decade %in% c("t90","t00","t10"),]
+# Count of PLSC PADM in 90s, 00s, and 10s
+c90 <- nrow(dat_9010[dat_9010$id %in% c(id_plsc, id_padm) & dat_9010$decade == "t90",]);c90
+c00 <- nrow(dat_9010[dat_9010$id %in% c(id_plsc, id_padm) & dat_9010$decade == "t00",]);c00
+c10 <- nrow(dat_9010[dat_9010$id %in% c(id_plsc, id_padm) & dat_9010$decade == "t10",]);c10
+c20 <- nrow(dat[dat$id %in% c(id_plsc, id_padm) & dat$decade == "t20",]);c20
+```
+
+Share of PLSC PADM in total in 90s, 00s, and 10s
+
+```{r}
+100*c90/length(id90)
+100*c00/length(id00)
+100*c10/length(id10)
+100*c20/length(id20)
+```
+
+### New Disciplines in 00s and 10s
+
+Only the three decades
+
+```{r}
+nrow(dat_9010)
+# Use as.character to wrap the decade variable to avoid non-applicable t80 and t20 from appearing from the table
+print_freq_tables(as.character(dat_9010$decade))
+```
+
+How many disciplines are within 1991 and 2020?
+
+1.  Single out the vector of disciplines. 2. Check their presence in each decade.
+
+```{r}
+cat_list <- as.character(cat_freq$Var1)
+## Get a cat_decade dataframe
+dec_cat <- separate_rows(data = dat[,c("decade", "WoS Categories")], "WoS Categories", sep = ";", convert = T)
+dec_cat$`WoS Categories` <- trimws(dec_cat$`WoS Categories`)
+## Which are the disciplines in the 80s and before?
+print_freq_tables(dec_cat$`WoS Categories`[dec_cat$decade == "t80"])
+## Which are the disciplines in the 90s?
+print_freq_tables(dec_cat$`WoS Categories`[dec_cat$decade == "t90"])
+## Which are the disciplines in the 00s?
+print_freq_tables(dec_cat$`WoS Categories`[dec_cat$decade == "t00"])
+## Which are the disciplines in the 10s?
+print_freq_tables(dec_cat$`WoS Categories`[dec_cat$decade == "t10"])
+## Which are the disciplines in the 20s?
+print_freq_tables(dec_cat$`WoS Categories`[dec_cat$decade == "t20"])
+```
+
+### More concentrated or diffused?
+
+Is this thread of literature becoming more diffused or more concentrated?
+
+```{r diffuse}
+top3dis_id <- unique(dat$id[grepl(pattern = "Economics|Demography|Geography", dat$`WoS Categories`, ignore.case = T)])
+length(top3dis_id)
+## 1990s, share of top 3 disciplines: Econ, Demo, Geo
+length(top3dis_id[top3dis_id %in% dat$id[dat$decade == 't90']])
+length(top3dis_id[top3dis_id %in% dat$id[dat$decade == 't90']]) / nrow(dat[dat$decade == "t90",])
+## 2000s, share of top 3 disciplines: Econ, Demo, Geo
+length(top3dis_id[top3dis_id %in% dat$id[dat$decade == 't00']])
+length(top3dis_id[top3dis_id %in% dat$id[dat$decade == 't00']]) / nrow(dat[dat$decade == "t00",])
+## 2010s
+length(top3dis_id[top3dis_id %in% dat$id[dat$decade == 't10']])
+length(top3dis_id[top3dis_id %in% dat$id[dat$decade == 't10']]) / nrow(dat[dat$decade == "t10",])
+## 2020s
+length(top3dis_id[top3dis_id %in% dat$id[dat$decade == 't20']])
+length(top3dis_id[top3dis_id %in% dat$id[dat$decade == 't20']]) / nrow(dat[dat$decade == "t20",])
+```
+
+Which are the "new" disciplines in this literature?
+
+```{r}
+## New disciplines emerged in the 00s, comparing to the 90s
+new_cat_00 <- setdiff(unique(dec_cat$`WoS Categories`[dec_cat$decade == "t00"]), unique(dec_cat$`WoS Categories`[dec_cat$decade == "t90"]));head(new_cat_00)
+## New disciplines emerged in the 10s, comparing to the 00s
+new_cat_10 <- setdiff(unique(dec_cat$`WoS Categories`[dec_cat$decade == "t10"]), unique(dec_cat$`WoS Categories`[dec_cat$decade == "t00"]));length(new_cat_10)
+new_cat_10 <- setdiff(new_cat_10, unique(dec_cat$`WoS Categories`[dec_cat$decade == "t90"]))
+length(new_cat_10);head(new_cat_10)
+```
+
+Which are the topics in the newer disciplines?
+
+```{r}
+## First, get an id-discipline dataframe, make sure to include decade info for later on
+cat_id <- separate_rows(data = dat[, c("WoS Categories", "id", "decade")], "WoS Categories", sep = ";", convert = T)
+cat_id$`WoS Categories` <- trimws(cat_id$`WoS Categories`)
+head(cat_id)
+## Now, we have the discipline vectors for the 2000s and 2010s, and the discipline-id table. 
+## Get the article ids with emerging disciplines in the literature
+### The length of the ids in the 2000s and the 2010s are the number publications from new disciplines
+id00_new_cat <- unique(cat_id$id[cat_id$`WoS Categories` %in% new_cat_00]); length(id00_new_cat)
+id10_new_cat <- unique(cat_id$id[cat_id$`WoS Categories` %in% new_cat_10]); length(id10_new_cat)
+```
+
+# Topic
+
+The skilled migration publications have expanded over the past three decades. The large number and a relatively long history of this literature enables a thorough investigation to its evolution and variation across disciplines. What was the mainstream topic in this literature? Did the mainstream topic evolve over time? How did different disciplines approach this topic? What specific policy and programs have been covered by political science and public administration scholars?
+
+## Mainsteam
+
+Get keyword frequency
+
+```{r}
+keyword <- separate_rows(data = dat[nchar(dat$keywords)>1,c("keywords","decade", "id")], "keywords", sep = ";", convert = T)
+keyword$keywords <- trimws(keyword$keywords)
+keyword <- keyword[nchar(keyword$keywords)>1,]
+head(keyword)
+```
+
+Merge keywords with `cat_id` by the `id` column
+
+```{r}
+key_cat <- merge(keyword, cat_id, by = "id", all.x = T)
+key_cat <- key_cat[nchar(key_cat$keywords)>1,] # eliminate ' ' place holder, keep >=2 characters
+key_cat$keywords <- toupper(key_cat$keywords)
+```
+
+All-time keyword frequency
+
+Remove stopwords. Stopwords include the search terms in this query. Their presence does not add information.
+
+```{r}
+stopwords <- c("migration","immigration","immigrant","immigrants","migrants","migrant","skilled migration", "skilled migrants","emigration","skills","skill")
+stopwords <- toupper(stopwords)
+## Remove stopwords from the keyword-discipline data
+keyword <- keyword[!keyword$keywords %in% stopwords,]
+key_cat <- key_cat[!key_cat$keywords %in% stopwords,]
+```
+
+### Keyword Frequency
+
+```{r}
+keyword_freq <- freq_tables(keyword$keywords[!key_cat$keywords %in% stopwords])
+print_freq_tables(keyword$keywords)
+```
+
+```{r}
+top20_keyword_freq <- paste(keyword_freq$var[1:20]," (", keyword_freq$Freq[1:20], ", ", keyword_freq$pct[1:20],")", sep = "")
+# collapse to concatenate a vector of strings
+paste(tolower(top20_keyword_freq), collapse = ", ")
+```
+
+### Themes from Keywords (patterns)
+
+The keywords were combined with three strategies. The first strategy is to combine all phrases that include the target keyword. For example, impact was the most frequent word. Phrases such as "economic impact", "demographic impact" were included in the impact group. The second strategy is to combine spelling variations, plural forms, and synonyms. The third strategy is to combine keywords of different meaning but belong to the same category. For example, I grouped sex (gender, women, men), family (generation, family, fertility, children), age (aging, youth, young, older), and race (race, ethnic) related keywords into a broader demographic characteristics category. Also combined here were the policy related words, including policies, regulation, law, rule, and politics.
+
+```{r}
+## Strategy one, sub-string matching
+#pat_mobility = "mobility"
+#pat_impact = "impact"
+#pat_network = "network"
+
+## Strategy two, spelling variations, plural forms, synonyms
+pat_income = "wage|earning|income|salary"
+pat_employ = "employ|labor|labour|job"
+#pat_brain = "brain drain|brain-drain"
+#pat_growth = "growth"
+
+## Strategy three, words belong to the same category/family
+pat_education = "education|learn|student|university"
+pat_policy = "policy|policies|regulation|rule"
+pat_politics = "politics|political"
+pat_pol = paste(pat_policy, pat_politics, sep = "|"); pat_pol
+#pat_demo = "aging|youth|young|older|gender|woman|women|family|families|fertility|^man$|^men$|children|generation|race|identity|ethnic" # de-activate for now
+#pat_attitude = "attitude|opposition|polarization|opinion|perception|segregation|prejudice|equality|integration|discrimination" # de-activate for now
+#pat_equal = "segregat|equality|integration|discriminat|prejudice"
+```
+
+```{r}
+# How many publications have keywords
+keyword_denomi <- length(unique(keyword$id))
+ids_w_key <- unique(keyword$id)
+```
+
+### Theme-Frequency Matrix
+
+Add columns to the main data
+
+```{r varnames_kw_bi}
+## Create variable names. Search all objects start with pat_ in .GlobalEnv
+pat <- grep("pat_",names(.GlobalEnv),value=TRUE)
+
+
+## get the content of each object into a list
+patterns_l <- do.call("list", mget(pat))
+
+## convert the list to a data frame
+pattern_df <- data.frame(do.call(rbind, patterns_l))
+dim(pattern_df); colnames(pattern_df) <- "patterns"
+pattern_df$theme <- pat
+# sort the themes by alphabetical order
+pattern_df <- pattern_df[order(pattern_df$theme),] 
+rownames(pattern_df) <- NULL
+# extract variable names AFTER the themes were sorted
+varnames <- gsub(pattern = "pat_", replacement = "", pattern_df$theme); varnames
+## experiment with new variable names
+newnames <- varnames
+for (i in 1:length(varnames)) {
+  if(newnames[i] == "demo") {
+    newnames[i] <- "demographic_characteristics"
+  } else if (newnames[i] == "edu") {
+    newnames[i] <- "education"
+  } else if (newnames[i] == "employ") {
+    newnames[i] <- "employment"
+  } else if (newnames[i] == "brain") {
+    newnames[i] <- "brain_drain"
+  }
+}
+varnames <- newnames
+
+## initiate an empty data frame
+keyword_bi <- data.frame(matrix(ncol = length(varnames), nrow = nrow(dat)))
+colnames(keyword_bi) <- varnames
+
+## match 0s and 1s of the patterns in the keywords.
+for (i in 1:ncol(keyword_bi)) {
+  keyword_bi[,i] <- ifelse(grepl(pattern = pattern_df$patterns[i], dat$keywords, ignore.case = T), 1, 0)
+}
+
+## column sum of keywords
+colSums(keyword_bi)
+## Bind the colSums freq and % into one dataframe
+keyword_colsum <- data.frame(cbind(
+  keyword = varnames,
+  Freq = colSums(keyword_bi),
+  pct = paste(round(100*colSums(keyword_bi)/keyword_denomi,2), "%", sep = "")
+))
+```
+
+```{r}
+## Add the patterns to the data frame of the keyword/theme list
+keyword_colsum$pattern <- pattern_df$patterns
+keyword_colsum <- keyword_colsum[rev(order(keyword_colsum$Freq)),]
+rownames(keyword_colsum) <- 1:nrow(keyword_colsum)
+keyword_colsum$keyword <- trimws(keyword_colsum$keyword)
+datatable(keyword_colsum, caption = "Keyword, Frequency, and Search Patterns")
+
+## Number of publications with at least one of the designated categories
+length(which(rowSums(keyword_bi)>0))
+
+## % among all publications with keywords
+length(which(rowSums(keyword_bi)>0)) / keyword_denomi
+```
+
+Printed out the descending keyword, frequency, and %
+
+After categorizing the keywords, the following `r length(keyword_colsum$keyword)` themes emerged.
+
+They are `r paste(paste(keyword_colsum$keyword, " (", keyword_colsum$Freq,", ", keyword_colsum$pct, ")", sep = ""), collapse = ", ")`. These themes cover `r length(which(rowSums(keyword_bi)>0))` (`r round(100*length(which(rowSums(keyword_bi)>0)) / keyword_denomi, 2)`%) of the `r keyword_denomi` publications with keywords.
+
+```{r}
+paste(paste(keyword_colsum$keyword, " (", keyword_colsum$Freq,", ", keyword_colsum$pct, ")", sep = ""), collapse = ", ")
+```
+
+### Theme-Frequency Matrix
+
+```{r}
+# use the same method to construct a binary matrix that query from the main text (Title + Abstract)
+text_bi <- data.frame(matrix(ncol = length(varnames), nrow = nrow(dat)))
+colnames(text_bi) <- varnames
+## match 0s and 1s of the patterns in the keywords.
+for (i in 1:ncol(text_bi)) {
+  text_bi[,i] <- ifelse(grepl(pattern = pattern_df$patterns[i], dat$text, ignore.case = T), 1, 0)
+}
+
+## column sum of keywords
+colSums(text_bi)
+## Bind the colSums freq and % into one data frame
+text_colsum <- data.frame(cbind(
+  keyword = varnames,
+  Freq = colSums(text_bi), # characters by default
+  pct = paste(round(100*colSums(text_bi)/nrow(dat),2), "%", sep = "")
+))
+text_colsum$Freq <- as.numeric(text_colsum$Freq) # very strange, the default class of frequency is character
+text_colsum <- text_colsum[rev(order(text_colsum$Freq)),]
+rownames(text_colsum) <- 1:nrow(text_colsum)
+```
+
+```{r}
+datatable(text_colsum, caption = "Patterns matches in titles and abstracts")
+```
+
+### Theme Coverage in Title & Abstract
+
+```{r}
+## Number of publications with at least one of the designated categories
+length(which(rowSums(text_bi)>0))
+
+## % among all publications with keywords
+length(which(rowSums(text_bi)>0)) / nrow(dat)
+```
+
+I then tested the performance of themes extracted from the keywords by applying them in the article titles and abstracts. The performance of keyword-based themes turned out to provide `r round(100*length(which(rowSums(text_bi)>0)) / nrow(dat), 2)`% coverage of all the publications. This is the distribution of the themes when matching them in the titles and abstracts: `r paste(paste(text_colsum$keyword, " (", text_colsum$Freq,", ", text_colsum$pct, ")", sep = ""), collapse = ", ")`.
+
+For example, the previous example for text processing now has its matched themes. According to the methods, the original text body is expressed as `r paste(names(text_bi[100,][,colSums(text_bi[100,])>0]), collapse = ", ")`.
+
+```{r}
+paste(dat$`Article Title`[100], dat$Abstract[100], sep = ' ')
+text_bi[100,][,colSums(text_bi[100,])>0]
+names(text_bi[100,][,colSums(text_bi[100,])>0])
+```
+
+
+
+## Theme Validation (`tfidf`)
+
+See the term frequencies in the main text, including bi-grams.
+
+Two purposes: (1) to capture new themes, and (2) to include more patterns into the themes. E.g., educational, educate, academic
+
+```{r tf_df}
+tf_df_list <- vector(mode = "list")
+for (i in dat$id) {
+  tf_df_list[[i]] <- data.frame(table(c(
+    str_tokenize(dat$text[dat$id == i], split = " "),
+    bi_gram(str_tokenize(dat$text[dat$id == i], split = " ")),
+    tri_gram(str_tokenize(dat$text[dat$id == i], split = " "))
+  )))
+  tf_df_list[[i]]$id <- i
+}
+paste("The following step takes a long time to run. It begins at", Sys.time())
+tf_df <- data.frame(do.call(rbind, tf_df_list))
+tf_df$Var1 <- as.character(tf_df$Var1)
+rownames(tf_df) <- NULL
+paste("The term-frequency data frame conversion finished at", Sys.time(), "/ The term-frequency data has", format(dim(tf_df)[1], big.mark = ","), "rows.")
+
+# Next, remove the terms that only appeared few times in all documents.
+tf_df_table <- data.frame(table(
+  tf_df$Var1
+))
+tf_df_table$Var1 <- as.character(tf_df_table$Var1)
+
+paste("Across all documents, there are", format(length(tf_df_table$Var1), big.mark = ","), "unique terms (including the customized range n-grams). The frequency in this table means the number of documents that contain the pattern.")
+
+## Retain the terms that appeared in many documents.
+thres_dfi = length(dat$id)*0.01
+paste("Keep the terms that are common enough. E.g., keep the terms that appear in more than 1% of the documents:", thres_dfi)
+
+tf_df_table <- tf_df_table[tf_df_table$Freq > thres_dfi,]
+paste("After removing the less frequent terms,", format(nrow(tf_df_table),big.mark = ","), "remained.")
+#print("Continue filtering this table by removing the terms that were already covered in the themes.")
+```
+
+```{r eval = F}
+## JOIN ALL PATTERNS FROM ALL THEMES
+tokenized_patterns <- unlist(strsplit(paste(paste(pattern_df$patterns),collapse = "|"), split = "|", fixed = T))
+joined_patterns <- paste(tokenized_patterns, collapse = "|")
+
+words_remove <- as.character(tf_df_table$Var1[grepl(pattern = joined_patterns, tf_df_table$Var1)])
+
+
+paste("These words were already captured from the existing themes:", paste(words_remove, collapse = ","),". A total of", length(words_remove), "words were removed.")
+
+tf_df_table <- tf_df_table[!tf_df_table$Var1 %in% words_remove, ]
+nrow(tf_df_table)
+```
+
+
+```{r tf_df_table}
+## Also, remove single characters
+tf_df_table <- tf_df_table[nchar(tf_df_table$Var1)>1, ]
+
+## Remove entries containing only numbers
+
+tf_df_table <- tf_df_table %>% filter(is.na(as.numeric(Var1)))
+
+## Remove entries topic-specific generic terms
+
+other_removewords <- c("migrant","migration", "immigrant", "immigration", "emigrant", "emigration", "skilled", "skill")
+tf_df_table <- tf_df_table[!tf_df_table$Var1 %in% other_removewords, ]
+tf_df_table <- tf_df_table[!grepl(pattern = paste(other_removewords, collapse = "|"), tf_df_table$Var1), ]
+
+
+paste("Now, the term-frequency table has", format(nrow(tf_df_table),big.mark = ","), "terms.")
+
+## Shorten the `tf_df` data frame that only includes the remaining terms.
+tf_df <- tf_df[tf_df$Var1 %in% tf_df_table$Var1, ]
+```
+
+
+$$w_{i,j} = tf_{i,j} \times log \frac{N}{df_{i}}$$
+
+Where,
+
+$tf_{i,j} =$ the number of occurrences of $i$ in $j$
+
+$df_{i} =$ the number of documents containing $i$
+
+$N =$ total number of documents
+
+```{r tf_idf}
+# Now merge the following two data frames, `tf_df` and `tf_df_table`
+class(tf_df$Var1) = "character"
+class(tf_df_table$Var1) = "character"
+tf_idf <- merge(tf_df, tf_df_table, by = "Var1", all.x = TRUE)
+names(tf_idf) <- c("t","f","id","n_doc")
+## Add the weight column that calculates the weight of each term in each document
+tf_idf$w <- tf_idf$f*log(length(unique(tf_idf$id)) / tf_idf$n_doc)
+
+## What are the words with the lowest weight?
+
+paste("The following words were assigned to the lowest weights:", paste(unique(tf_idf$t[tf_idf$w < 1]),collapse = ", "),  "because they appeared in too many documents." )
+
+tf_idf <- tf_idf[tf_idf$w > 1, ]
+
+paste("Having the words with the lowest weights removed, the remaining `tf-idf` table has", format(nrow(tf_idf), big.mark = ","), "rows." )
+
+```
+
+```{r}
+# Order the weight for each document
+tf_idf <- arrange(tf_idf, desc(w), group_by = id)
+tf_idf <- tf_idf[order(tf_idf$id), ]
+rownames(tf_idf) <- NULL
+# Check the distribution of the weights
+quantile(tf_idf$w, c(.5, .75, .8, .9, .95, .99))
+## rank the weights of terms within each id
+tf_idf <- tf_idf %>% group_by(id) %>% mutate(rank = row_number())
+## keep a reduced tf_idf with highest ranked terms for each id
+quantile(tf_idf$w, .95)
+tf_idf_top <- tf_idf[tf_idf$rank <= 3 | tf_idf$w > quantile(tf_idf$w, .95), ]
+nrow(tf_idf_top)
+paste("The `tf_idf` data frame summarizes the top 3 (at least) highest weighted terms in", format(nrow(tf_idf_top), big.mark = ","), "rows.")
+```
+
+
+
+
+## Theme by Decade
+
+The following is the descending list of keywords by decade. Although the keywords are to be combined into themes, the frequency tables provide useful insights.
+
+### Keyword frequency by decade
+
+```{r}
+# t90
+print_freq_tables(keyword$keywords[keyword$decade == "t90"])
+# t00
+print_freq_tables(keyword$keywords[keyword$decade == "t00"])
+# t10
+print_freq_tables(keyword$keywords[keyword$decade == "t10"])
+# t20
+print_freq_tables(keyword$keywords[keyword$decade == "t20"])
+```
+
+### Evolution of Themes by Decade
+
+To examine the longitudinal patterns, I decided to select the publications in the past three decades, i.e., 1990s, 2000s, and 2010s. There are `r format(nrow(dat_9010), big.mark = ",")` publications that were published between 1991 and 2020, representing `r round(100*nrow(dat_9010) / nrow(dat), 2)`% of the total publications. Most publications excluded were published between 2021 and 2023---I will discuss them separately.
+
+```{r}
+nrow(dat_9010)
+nrow(dat_9010) / nrow(dat)
+```
+
+To tabulate the theme distribution, either by the keyword matches or the title/abstract matches, I need to join the theme frequency matrix to be joined to the main data. I recommend use the theme frequency matrix of the title/abstract because the coverage is better. (Also, 165 publications had missing keywords, but only 36 publications had missing abstracts).
+
+```{r concat_df_text_freq}
+dat_tf <- cbind(dat[, c("Publication Year", "id","decade","Times Cited, WoS Core")], text_bi)
+```
+
+```{r theme_by_decade}
+theme_dec <- data.frame(aggregate(dat_tf[, names(dat_tf) %in% varnames], by = list(decade = dat_tf$decade), sum), row.names = 'decade')
+datatable(t(theme_dec))
+```
+
+Although the share of political science and public administration publications have been stable. The policy theme has moved up into the top three in the 2000s and 2010s, compared to the 1990s.
+
+```{r top_theme_dec_loop}
+theme_dec_t <- data.frame(t(theme_dec))
+# publication counts by decade
+dec_ct <- c(length(id80), length(id90), length(id00), length(id10), length(id20))
+names(dec_ct) <- as.character(unique(dat$decade))
+paste("The publication count of these decades are:",paste(names(dec_ct), "-", dec_ct, collapse = ", "),sep = " ")
+
+# this is to create a % data frame of the theme by decade table
+theme_dec_t_pct <- data.frame(matrix(ncol = ncol(theme_dec_t), nrow = nrow(theme_dec_t)))
+colnames(theme_dec_t_pct) <- colnames(theme_dec_t)
+rownames(theme_dec_t_pct) <- rownames(theme_dec_t_pct)
+## fill in proportion values based on publication counts of the theme and the total publications in the decade
+for (i in 1:ncol(theme_dec_t)) {
+  theme_dec_t_pct[,i] <- theme_dec_t[,i] / dec_ct[i]
+}
+
+# print top tive themes along with the publication numbers, looping over each decade
+for (col in colnames(theme_dec_t)) {
+  print(col)
+  print(paste(paste(
+    rownames(theme_dec_t[rev(order(theme_dec_t[, col])), ])[1:5],
+    " (",
+    sort(theme_dec_t[, col], decreasing = T)[1:5],
+    ", ",
+    paste(round(100*sort(theme_dec_t_pct[, col], decreasing = T),2)[1:5], "%", sep = ""), # from a different data frame
+    ")",
+    sep = ""
+  ),
+  collapse = ", ")) # the outer paste is to join different text strings
+  
+}
+rownames(theme_dec_t_pct)<- rownames(theme_dec_t)
+
+datatable(round(theme_dec_t_pct,4), caption = "Theme by Decade by Proportion")
+```
+
+Modify the theme by decade data frame. Make the row names to one of the columns
+
+```{r}
+theme_dec<- cbind(
+  decade = rownames(theme_dec),
+  theme_dec,
+  row.names = NULL
+)
+
+## decades in row, theme by decade proportion
+theme_dec_t_pct <- cbind(
+  theme = rownames(theme_dec_t_pct),
+  theme_dec_t_pct,
+  row.names = NULL
+)
+```
+
+More details, theme by published year
+
+```{r theme_yr}
+theme_yr <- data.frame(aggregate(dat_tf[, names(dat_tf) %in% varnames], by = list(year = dat_tf$`Publication Year`), sum))
+datatable(theme_yr)
+```
+
+## Theme by Discipline
+
+```{r}
+head(key_cat)
+```
+
+### Top N Disciplines
+
+```{r}
+top_cat <- as.character(cat_freq$Var1[1:20])
+# Top N disciplines with the most publications
+paste(top_cat, collapse = ", ")
+```
+
+### Keyword Frequency by Discipline
+
+```{r}
+key_cat_allyr_list <- vector(mode = "list")
+for(cat in top_cat) {
+ key_cat_allyr_list[[cat]] <- freq_crosslist(key_cat$keywords[key_cat$`WoS Categories` == cat], denominator = nrow(dat))
+}
+key_cat_allyr <- data.frame(do.call(rbind, key_cat_allyr_list))
+#key_cat_allyr$Discipline <- rownames(key_cat_allyr)
+key_cat_allyr$Discipline <- sub(".[0-9]+", "",rownames(key_cat_allyr))
+key_cat_allyr$Rank <- str_extract(rownames(key_cat_allyr), "[[:digit:]]+")
+key_cat_allyr$Rank <- as.numeric(key_cat_allyr$Rank)
+rownames(key_cat_allyr) <- NULL
+
+datatable(key_cat_allyr[key_cat_allyr$Rank <=50 & key_cat_allyr$Frequency > 2,])
+```
+
+PLSC and PADM Keyword Frequency
+
+```{r}
+print_fq_crlt(key_cat$keywords[key_cat$`WoS Categories` %in% c("Public Administration", "Political Science")], denominator = length(id_plsc_padm), header = "Keyword Frequency Table in Political Science and Public Administration")
+```
+
+### Case IDs by Themes
+
+Create a list of theme-based ids. Create different subsets of the theme_id because I will need them for decade tabulation
+
+```{r theme_id}
+theme_id <- vector(mode = "list", length = length(varnames))
+names(theme_id) <- varnames
+# Fill in the ids for each theme, loop over varnames
+for (var in varnames) {
+  theme_id[[var]] <- dat_tf$id[dat_tf[, var] > 0] # double wrapping for list objects
+}
+```
+
+```{r theme_dec_id}
+## Create a data frame with cells filled with the ids of specific theme and decade
+theme_dec_id <- data.frame(matrix
+                          (ncol = length(varnames), nrow = length(unique(
+                            dat$decade
+                          ))),
+                          row.names = unique(dat$decade))
+colnames(theme_dec_id) <- varnames
+
+for (decade in rownames(theme_dec_id)) {
+  for (var in varnames) {
+    theme_dec_id[decade, var] <- paste(
+        dat_tf$id[dat_tf$decade == decade & dat_tf[, var] > 0], collapse = ",") # The length of each cell is 1, has to be tokenized for indexing
+  }
+}
+theme_dec_id <- data.frame(cbind(
+  decade = rownames(theme_dec_id),
+  theme_dec_id,
+  row.names = NULL
+))
+print("To index individual publication IDs, use the `str_tokenize` function, as defined at the beginning of this document.")
+```
+
+How about a theme by year id data frame?
+
+```{r theme_yr_id}
+theme_yr_id <- data.frame(matrix
+                          (ncol = length(varnames), nrow = length(unique(
+                            dat$`Publication Year`
+                          ))),
+                          row.names = unique(dat$`Publication Year`))
+colnames(theme_yr_id) <- varnames
+paste("The blank `theme by year` data frame of ids has", dim(theme_yr_id)[1], "rows, equals to the number of publication years; and", dim(theme_yr_id)[2], "columns, equals to the number of themes. Next, fill in the blank cells with publication ids.")
+
+## Fill in every cell by looping over the rows and the columns
+for (year in rownames(theme_yr_id)) {
+  for (var in varnames) {
+    theme_yr_id[year, var] <- paste(
+        dat_tf$id[dat_tf$`Publication Year`== year & dat_tf[, var] > 0], collapse = ",")
+  }
+}
+theme_yr_id <- data.frame(cbind(
+  decade = rownames(theme_yr_id),
+  theme_yr_id,
+  row.names = NULL
+))
+print("The `theme by year` data frame of ids has been filled. It's not for tabulation, but for indexing (updated on May 6, 2023).")
+datatable(theme_yr_id[10:12, 1:5], caption = "An illustration of the `theme by year` id table")
+```
+
+### Theme by Discipline, All Years
+
+Theme-discipline tabulation for all years
+
+```{r}
+theme_cat_list <- vector(mode = "list")
+for (theme in names(theme_id)) {
+ theme_cat_list[[theme]] <- freq_crosslist(cat_id$`WoS Categories`[cat_id$id %in% theme_id[[theme]]], denominator = length(theme_id[[theme]]))
+} 
+## The following sequence should not be changed
+theme_cat_allyr <- data.frame(do.call(rbind, theme_cat_list))
+theme_cat_allyr$Theme <- rownames(theme_cat_allyr)
+theme_cat_allyr$Rank <- str_extract(theme_cat_allyr$Theme, "[[:digit:]]+")
+theme_cat_allyr$Rank <- as.numeric(theme_cat_allyr$Rank) ## default as character after extraction
+theme_cat_allyr$Theme <- sub(".[0-9]+", "", rownames(theme_cat_allyr))
+rownames(theme_cat_allyr) <- NULL
+
+datatable(theme_cat_allyr[theme_cat_allyr$Frequency>1 & theme_cat_allyr$Rank <= 20,], caption = "Top Disciplines for Each Theme")
+```
+
+$\color{red}{\text{How to read the above table?}}$
+
+```{r echo = F}
+paste("Interpretation of this table: The most productive discipline in the theme of", toupper(theme_cat_allyr$Theme[1]), "is", toupper(theme_cat_allyr$Term[1]))
+```
+
+### Theme by Discipline by Decade
+
+```{r theme_cat_decade}
+# This needs a different approach from the all-year tabulation. We need to go back deeper to get a subset of theme_ids that are within 1991_2020
+# Source: cat_id, parameters: decade and theme
+
+## ADDRESS THE FOLLOWING ERROR (May 7, 2023)
+## Error in fq_crlt$Freq : $ operator is invalid for atomic vectors
+## If `word_count((theme_dec_id[, theme])[theme_dec_id$decade == dec],split = ",")` == 1, then create a new data frame manually, with column names of "Term","Frequency","Share". If == 0, next
+
+paste("The following are included in the loop:", paste(as.character(unique(cat_id$decade)), collapse = ","), ". It's safer to wrap a factor varible as character.")
+
+## Initiate a blank list
+theme_dec_cat_list <- vector(mode = "list")
+
+print("LOOP BEGINS:")
+for (dec in as.character(unique(cat_id$decade))) {
+  for (theme in varnames) {
+    theme_dec_cat_list[[dec]][[theme]] <-
+      freq_crosslist(cat_id$`WoS Categories`[cat_id$id %in% str_tokenize(text = (theme_dec_id[, theme])[theme_dec_id$decade == dec],
+                                                                         split = ",")],
+                     denominator = word_count((theme_dec_id[, theme])[theme_dec_id$decade == dec],
+                                              split = ","))
+    print(
+      paste(
+        "Loop over",
+        toupper(theme),
+        "and",
+        dec,
+        "has completed. The output has",
+        dim(theme_dec_cat_list[[dec]][[theme]])[1],
+        "row(s)."
+      ) # End of paste
+    ) # End of print
+  } # End of theme (inner) loop
+} # End of decade(outer) loop
+
+
+print("After repeated testing, the `freq_crosslist` function, expected to tabulate a vector of multiple elements, can now handle atom values or `NA` values. If the loop meets an atom value, Frequency = 1 and Share = 1, the later introduced `Rank` variable will also be set to 1.  If the loop meets an `NA` cell, a `Place_holder` row will be introduced with Frequency = 0. Just remove the rows with Frequency = 0 to remove the original `NA`s.")
+
+## Added Theme and Rank from the rownames, to combine all decades, create a list of df_list that store individual data frames of the decade (finished on May 7, 2023)
+theme_dec_cat_list_df_interim <- vector(mode = "list")
+
+for (dec in as.character(unique(cat_id$decade))) {
+  theme_dec_cat_list_df_interim[[dec]]<- data.frame(cbind(do.call(rbind, theme_dec_cat_list[[dec]])),decade = dec)
+  # Make sure all frequencies are larger than 0, this is to remove the place holder rows generated from variables without any elements.
+  theme_dec_cat_list_df_interim[[dec]] <- (theme_dec_cat_list_df_interim[[dec]])[theme_dec_cat_list_df_interim[[dec]]$Frequency > 0, ]
+  # Create a Theme column 
+  theme_dec_cat_list_df_interim[[dec]]$Theme <- rownames(theme_dec_cat_list_df_interim[[dec]]) # not final
+  theme_dec_cat_list_df_interim[[dec]]$Rank <- str_extract(theme_dec_cat_list_df_interim[[dec]]$Theme, "[[:digit:]]+") # Extract digits from theme
+  ## If there is only one row, Rank introduces NA, modify the NAs to 1
+  theme_dec_cat_list_df_interim[[dec]]$Rank[is.na(theme_dec_cat_list_df_interim[[dec]]$Rank)] <- 1
+  theme_dec_cat_list_df_interim[[dec]]$Rank <- as.numeric(theme_dec_cat_list_df_interim[[dec]]$Rank)
+  theme_dec_cat_list_df_interim[[dec]]$Theme <- sub(".[0-9]+", "", theme_dec_cat_list_df_interim[[dec]]$Theme)
+  rownames(theme_dec_cat_list_df_interim[[dec]]) <- NULL
+}
+## Combine the interim list into a single data frame
+theme_dec_cat_df <- data.frame(do.call(rbind, theme_dec_cat_list_df_interim), row.names = NULL)
+datatable(theme_dec_cat_df[theme_dec_cat_df$Rank <=10, ], caption = "Top 10 Disciplines of Each Theme by Decade")
+```
+
+
+### Policy
+
+```{r}
+### 1990s
+top10policy90s <- tolower(theme_dec_cat_df$Term[theme_dec_cat_df$Theme == "policy" & theme_dec_cat_df$decade == "t90" & theme_dec_cat_df$Rank <= 10])
+top10policy90sfreq <- paste(theme_dec_cat_df$Frequency[theme_dec_cat_df$Theme == "policy" & theme_dec_cat_df$decade == "t90" & theme_dec_cat_df$Rank <= 10], sep = "")
+
+top10policy90spct <- paste(round(100*theme_dec_cat_df$Share[theme_dec_cat_df$Theme == "policy" & theme_dec_cat_df$decade == "t90" & theme_dec_cat_df$Rank <= 10],2), "%", sep = "")
+#paste(top10policy90s, " (", top10policy90spct, ")", sep = "")
+paste("Top 10 disciplines that published in the policy theme in the 1990s were", paste(paste(top10policy90s, " (",top10policy90sfreq, ", ", top10policy90spct, ")", sep = ""), collapse = ", "))
+### 2000s
+top10policy00s <- tolower(theme_dec_cat_df$Term[theme_dec_cat_df$Theme == "policy" & theme_dec_cat_df$decade == "t00" & theme_dec_cat_df$Rank <= 10])
+top10policy00sfreq <- paste(theme_dec_cat_df$Frequency[theme_dec_cat_df$Theme == "policy" & theme_dec_cat_df$decade == "t00" & theme_dec_cat_df$Rank <= 10], sep = "")
+
+top10policy00spct <- paste(round(100*theme_dec_cat_df$Share[theme_dec_cat_df$Theme == "policy" & theme_dec_cat_df$decade == "t00" & theme_dec_cat_df$Rank <= 10],2), "%", sep = "")
+#paste(top10policy90s, " (", top10policy90spct, ")", sep = "")
+paste("Top 10 disciplines that published in the policy theme in the 2000s were", paste(paste(top10policy00s, " (",top10policy00sfreq, ", ", top10policy00spct, ")", sep = ""), collapse = ", "))
+### 2010s
+
+
+top10policy10s <- tolower(theme_dec_cat_df$Term[theme_dec_cat_df$Theme == "policy" & theme_dec_cat_df$decade == "t10" & theme_dec_cat_df$Rank <= 10])
+top10policy10sfreq <- paste(theme_dec_cat_df$Frequency[theme_dec_cat_df$Theme == "policy" & theme_dec_cat_df$decade == "t10" & theme_dec_cat_df$Rank <= 10], sep = "")
+
+top10policy10spct <- paste(round(100*theme_dec_cat_df$Share[theme_dec_cat_df$Theme == "policy" & theme_dec_cat_df$decade == "t10" & theme_dec_cat_df$Rank <= 10],2), "%", sep = "")
+#paste(top10policy90s, " (", top10policy90spct, ")", sep = "")
+paste("Top 10 disciplines that published in the policy theme in the 2010s were", paste(paste(top10policy10s, " (",top10policy10sfreq, ", ", top10policy10spct, ")", sep = ""), collapse = ", "))
+
+# If a loop is needed, create a list for the following parameters
+#paste("Top", n, "disciplines that published in the", theme, "in the", dec, paste( paste(cat, " (", freq, ", ", pct, ")", sep = ""), collapse = ", " ))
+
+
+```
+
+
+# Data Quick View
+
+```{r}
+names(dat)
+datatable(dat[,c("id", "Author Full Names", "Article Title", "Source Title", "WoS Categories")])
+```
+
+# Save Data
+
+```{r eval = F}
+write_xlsx(list("data" = dat, "cat_freq" = cat_freq, "cat_id" = cat_id, "dcd_cat"= dec_cat, "key_cat" = key_cat, "theme_dec" = theme_dec,"theme_pt_dec" = theme_dec_t_pct, "theme_yr" = theme_yr, "keyword" = keyword, "key_freq" = keyword_freq, "kw_binary" = keyword_bi, "txt_binary" = text_bi, "kw_colsum" = keyword_colsum, "year_cat" = year_cat, "year_ct" = year_ct, "theme_cat_dec" = theme_dec_cat_df, "tfidf" = tf_idf, "tfidf_top" = tf_idf_top), "mig_analysis.xlsx")
+```
+
+```{r}
+Sys.time()
+```
+
+
+
+
+
+
